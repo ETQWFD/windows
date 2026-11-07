@@ -12,6 +12,7 @@
 #    - TKE_REGISTRY_PASSWORD with TKE registry password
 #
 # 3. Change the values for the TKE_IMAGE_URL, TKE_REGION, TKE_CLUSTER_ID and DEPLOYMENT_NAME environment variables (below).
+# 4. Make sure your Dockerfile is committed to the repo, and set DOCKERFILE_PATH / BUILD_CONTEXT below to its real location.
 
 name: Tencent Kubernetes Engine
 
@@ -19,12 +20,18 @@ on:
   push:
     branches: [ "main" ]
 
-# Environment variables available to all jobs and steps in this workflow
 env:
   TKE_IMAGE_URL: ccr.ccs.tencentyun.com/demo/mywebapp
+  TKE_REGISTRY_HOST: ccr.ccs.tencentyun.com
   TKE_REGION: ap-guangzhou
   TKE_CLUSTER_ID: cls-mywebapp
   DEPLOYMENT_NAME: tke-test
+  # 镜像在 kustomization.yml 里的 name，用于 kustomize edit set image
+  # 例如 kustomization.yml 中 images: - name: mywebapp，这里就写 mywebapp
+  KUSTOMIZE_IMAGE_NAME: mywebapp
+  # Dockerfile 路径与构建上下文（按你仓库实际情况修改）
+  DOCKERFILE_PATH: Dockerfile
+  BUILD_CONTEXT: .
 
 permissions:
   contents: read
@@ -39,14 +46,19 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
 
-    # Build
+    # 可选：先确认 Dockerfile 存在，便于快速定位问题
+    - name: Verify Dockerfile exists
+      run: |
+        test -f "${DOCKERFILE_PATH}" || { echo "Dockerfile not found at ${DOCKERFILE_PATH}"; exit 1; }
+
+    # Build（用 -f 指定 Dockerfile，用 BUILD_CONTEXT 指定上下文）
     - name: Build Docker image
       run: |
-        docker build -t ${TKE_IMAGE_URL}:${GITHUB_SHA} .
+        docker build -f "${DOCKERFILE_PATH}" -t ${TKE_IMAGE_URL}:${GITHUB_SHA} "${BUILD_CONTEXT}"
 
     - name: Login TKE Registry
       run: |
-        docker login -u ${{ secrets.TENCENT_CLOUD_ACCOUNT_ID }} -p '${{ secrets.TKE_REGISTRY_PASSWORD }}' ${TKE_IMAGE_URL}
+        echo '${{ secrets.TKE_REGISTRY_PASSWORD }}' | docker login -u ${{ secrets.TENCENT_CLOUD_ACCOUNT_ID }} --password-stdin ${TKE_REGISTRY_HOST}
 
     # Push the Docker image to TKE Registry
     - name: Publish
@@ -55,7 +67,8 @@ jobs:
 
     - name: Set up Kustomize
       run: |
-        curl -o kustomize --location https://github.com/kubernetes-sigs/kustomize/releases/download/v3.1.0/kustomize_3.1.0_linux_amd64
+        curl -sSL -o kustomize --location https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.4.3/kustomize_v5.4.3_linux_amd64.tar.gz
+        tar -xzf kustomize
         chmod u+x ./kustomize
 
     - name: Set up ~/.kube/config for connecting TKE cluster
@@ -69,11 +82,12 @@ jobs:
     - name: Switch to TKE context
       run: |
         kubectl config use-context ${TKE_CLUSTER_ID}-context-default
+        kubectl config get-contexts
 
     # Deploy the Docker image to the TKE cluster
     - name: Deploy
       run: |
-        ./kustomize edit set image ${TKE_IMAGE_URL}:${GITHUB_SHA}
+        ./kustomize edit set image ${KUSTOMIZE_IMAGE_NAME}=${TKE_IMAGE_URL}:${GITHUB_SHA}
         ./kustomize build . | kubectl apply -f -
         kubectl rollout status deployment/${DEPLOYMENT_NAME}
         kubectl get services -o wide
